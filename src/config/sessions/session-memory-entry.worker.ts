@@ -1,20 +1,23 @@
 import { channel as diagnosticsChannel } from "node:diagnostics_channel";
+import { getHeapStatistics } from "node:v8";
+import { resourceLimits } from "node:worker_threads";
 import type { WorkerTaskControl } from "@openclaw/worker-runtime/worker";
 import { projectSessionEntryRecord } from "../../../packages/memory-host-sdk/src/host/session-entry-projection.js";
 import {
+  createSessionEntryRenderer,
   renderSessionEntrySnapshot,
   readSessionEntryResetRecallCutoff,
+  sqliteSessionFileState,
 } from "../../../packages/memory-host-sdk/src/host/session-entry-render.js";
+import { createSessionResetRecallCutoffTracker } from "../../../packages/memory-host-sdk/src/host/session-reset-recall.js";
 import { LruCache } from "../../infra/lru-cache.js";
 import { isPostgresSqlConnection } from "../../infra/sql-connection.js";
 import { runSqliteReadSnapshotSync } from "../../infra/sqlite-transaction.js";
 import type { WorkerTaskChannel } from "../../infra/worker-task-server.js";
 import { prepareAssistantTranscriptText } from "../../shared/chat-message-content.js";
 import { withOpenClawAgentDatabaseReadOnly } from "../../state/openclaw-agent-db-readonly.js";
-import {
-  readTranscriptExportSnapshotReadOnlySync,
-  readTranscriptExportSnapshotsFromDatabase,
-} from "./session-accessor.sqlite-read.js";
+import { streamTranscriptExportSlices } from "./session-accessor.sqlite-export-slices.js";
+import { readTranscriptExportSnapshotsFromDatabase } from "./session-accessor.sqlite-read.js";
 import {
   resolveSqliteTranscriptReadScope,
   toDatabaseOptions,
@@ -23,7 +26,7 @@ import { readTranscriptStatsBatchFromDatabase } from "./session-accessor.sqlite-
 import { SessionTranscriptColdError } from "./session-transcript-cold-error.js";
 import { runWithSessionTranscriptReadFence } from "./session-transcript-read-fence.js";
 import type {
-  SessionEntryWorkerInput,
+  SessionEntriesDelivery,
   SessionEntriesWorkerInput,
 } from "./session-transcript-worker-read.types.js";
 import type { SessionTranscriptWorkerValues } from "./session-transcript-worker.types.js";
@@ -33,6 +36,8 @@ type Snapshot = Exclude<
   "cold"
 >;
 type ExportRequest = Parameters<typeof readTranscriptExportSnapshotsFromDatabase>[1][number];
+type ExportDatabase = Parameters<typeof readTranscriptExportSnapshotsFromDatabase>[0];
+type ExportTransaction = Parameters<typeof streamTranscriptExportSlices>[0]["transaction"];
 type PreparedEntries = SessionTranscriptWorkerValues["session-entries"]["entries"];
 const snapshots = new LruCache<Snapshot>(16, {
   maxBytes: 8 * 1024 * 1024,
@@ -40,21 +45,22 @@ const snapshots = new LruCache<Snapshot>(16, {
 });
 diagnosticsChannel("openclaw.memory.critical").subscribe(() => snapshots.clear());
 const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024;
+// Decoding one event holds its payload, parsed and rendered copies; above this share it may not
+// fit. A worker's own old-space limit is not reflected in its heap statistics.
+const MAX_STREAMED_EVENT_BYTES = Math.floor(
+  (resourceLimits.maxOldGenerationSizeMb
+    ? resourceLimits.maxOldGenerationSizeMb * 1024 * 1024
+    : getHeapStatistics().heap_size_limit) / 8,
+);
+// A rewrite during a sliced read restarts it; restarts are bounded, then the read is whole.
+const MAX_STREAM_RESTARTS = 3;
+type Deliver = (frame: SessionEntriesDelivery) => Promise<void>;
 
 /** The export worker retains projected rows; transcript rewrite identity replaces the prefix. */
-export async function prepareSessionMemoryEntry(request: SessionEntryWorkerInput) {
-  const [result] = await prepareSessionMemoryEntries([request]);
-  if ("cold" in result!) {
-    throw new SessionTranscriptColdError(request.options.sessionId);
-  }
-  return result!;
-}
-
 async function prepareSessionMemoryEntries(
   entries: SessionEntriesWorkerInput["entries"],
-  publish?: (index: number, value: PreparedEntries[number]) => Promise<void>,
-): Promise<PreparedEntries> {
-  const results: PreparedEntries = [];
+  deliver: Deliver,
+): Promise<void> {
   const groups = new Map<
     string,
     { index: number; resolved: ReturnType<typeof resolveSqliteTranscriptReadScope> }[]
@@ -144,35 +150,32 @@ async function prepareSessionMemoryEntries(
       // projected snapshot and every expanded entry in this 512 MiB isolate.
       for (const [offset, { index }] of batch.entries()) {
         const request = entries[index]!;
-        let snapshot = exported.found ? exported.value.shift()! : null;
-        if (snapshot && snapshot !== "cold" && snapshot.deferred) {
-          snapshot = readDeferredSnapshot(request, requests[offset]!.options, snapshot);
-        }
+        const snapshot = exported.found ? exported.value.shift()! : null;
         let value: PreparedEntries[number];
-        if (snapshot === "cold") {
+        if (snapshot && snapshot !== "cold" && snapshot.deferred) {
+          retainSnapshot(snapshotKey(request), null);
+          const streamed = await streamDeferredEntry(
+            index,
+            request,
+            requests[offset]!.options,
+            snapshot,
+            deliver,
+          );
+          if (!streamed) {
+            continue;
+          }
+          value = streamed;
+        } else if (snapshot === "cold") {
           value = { cold: true };
         } else {
           retainSnapshot(snapshotKey(request), snapshot);
-          const entry = snapshot
-            ? await renderSessionEntrySnapshot(request.absPath, request.options, snapshot)
-            : null;
-          value = {
-            entry,
-            resetRecallCutoff: entry
-              ? readSessionEntryResetRecallCutoff(entry)
-              : { state: "absent" },
-          };
+          value = await renderSnapshotEntry(request, snapshot);
         }
-        if (publish) {
-          await publish(index, value);
-        } else {
-          results[index] = value;
-        }
+        await deliver({ kind: "session-entries", index, value });
       }
       start = end;
     }
   }
-  return results;
 }
 
 /** Hands each prepared entry to the host and waits for it to accept that entry before the next. */
@@ -185,33 +188,158 @@ export async function deliverSessionMemoryEntries(
     throw new Error("Session exports require their host delivery channel");
   }
   channel.consumeInput();
-  await prepareSessionMemoryEntries(entries, async (index, value) => {
+  await prepareSessionMemoryEntries(entries, async (frame) => {
     control.throwIfCancelled();
-    const response = await channel.request({ kind: "session-entries", index, value });
+    const response = await channel.request(frame);
     response.consumed();
     control.throwIfCancelled();
   });
   return { entries: [] };
 }
 
-/** Reads a transcript above the retention limit in short slices after its batch transaction. */
-function readDeferredSnapshot(
+/**
+ * Streams a transcript above the retention limit to the host in rendered chunks, one bounded
+ * slice at a time, so no allocation here grows with the transcript. Returns the entry value the
+ * caller still has to deliver, or undefined once the stream delivered its own end frame.
+ */
+async function streamDeferredEntry(
+  index: number,
   request: SessionEntriesWorkerInput["entries"][number],
   options: ExportRequest["options"],
   batchHead: Snapshot,
-): Snapshot | null | "cold" {
-  try {
-    // An unchanged transcript keeps the batch statistics instead of reading them again.
-    return runWithSessionTranscriptReadFence(
-      request.admission,
-      () => readTranscriptExportSnapshotReadOnlySync(request.options, options, batchHead) ?? null,
+  deliver: Deliver,
+): Promise<PreparedEntries[number] | undefined> {
+  const resolved = resolveSqliteTranscriptReadScope(request.options);
+  const exportRequest = { resolved, scope: request.options, options };
+  const readHead = (database: ExportDatabase, slicing?: { deferAboveBytes: number }) =>
+    readTranscriptExportSnapshotsFromDatabase(database, [exportRequest], slicing)[0]!;
+  const transaction: ExportTransaction = (read) =>
+    withOpenClawAgentDatabaseReadOnly(
+      (database) =>
+        runSqliteReadSnapshotSync(database.db, () => read(database), {
+          operationLabel: "session transcript export snapshot",
+        }),
+      toDatabaseOptions(resolved),
     );
+  const slices = streamTranscriptExportSlices({
+    sessionId: resolved.sessionId,
+    batchHead,
+    projectEvent: options.projectEvent,
+    maxEventPayloadBytes: MAX_STREAMED_EVENT_BYTES,
+    // The entry carries the head's stats, so rows appended later make the next sync export again.
+    continueAfterAppends: true,
+    transaction,
+    readHead,
+  });
+  let state:
+    | {
+        renderer: ReturnType<typeof createSessionEntryRenderer>;
+        cutoff: ReturnType<typeof createSessionResetRecallCutoffTracker>;
+        line: number;
+        delivered: boolean;
+      }
+    | undefined;
+  let restarts = 0;
+  const discard = async () => {
+    if (state?.delivered) {
+      await deliver({ kind: "session-entries", index, reset: true });
+    }
+  };
+  try {
+    for (;;) {
+      const step = runWithSessionTranscriptReadFence(request.admission, () => slices.next());
+      if (step.done) {
+        if (!step.value || !state) {
+          return { entry: null, resetRecallCutoff: { state: "absent" } };
+        }
+        const resetRecallCutoff = state.cutoff.resolve();
+        await deliver({
+          kind: "session-entries",
+          index,
+          streamed: { header: state.renderer.header(), resetRecallCutoff },
+        });
+        return undefined;
+      }
+      if ("restart" in step.value) {
+        await discard();
+        state = undefined;
+        if (++restarts <= MAX_STREAM_RESTARTS) {
+          continue;
+        }
+        // A transcript that keeps changing is read whole in one transaction, as before streaming,
+        // when it fits the per-event budget; a larger one waits for the next sync.
+        const whole = runWithSessionTranscriptReadFence(request.admission, () =>
+          transaction((database) =>
+            readHead(database, { deferAboveBytes: MAX_STREAMED_EVENT_BYTES }),
+          ),
+        );
+        if (!whole.found) {
+          return { entry: null, resetRecallCutoff: { state: "absent" } };
+        }
+        if (whole.value === "cold") {
+          return { cold: true };
+        }
+        if (whole.value.deferred) {
+          throw new Error(
+            `Session ${request.options.sessionId} kept changing during its memory export`,
+          );
+        }
+        return await renderSnapshotEntry(request, whole.value);
+      }
+      const events = "events" in step.value ? step.value.events : step.value.head.events;
+      if ("head" in step.value) {
+        const { head } = step.value;
+        state = {
+          renderer: createSessionEntryRenderer(request.absPath, request.options, {
+            ...sqliteSessionFileState(
+              request.absPath,
+              request.options,
+              head.stats,
+              request.options.updatedAtMs,
+            ),
+            kind: "sqlite",
+            sessionKey: head.sessionKey,
+          }),
+          cutoff: createSessionResetRecallCutoffTracker(),
+          line: 0,
+          delivered: false,
+        };
+      }
+      const current = state!;
+      for (const event of events) {
+        current.cutoff.add(event);
+        if (current.renderer.render(event, current.line++)) {
+          await discard();
+          current.delivered = false;
+        }
+      }
+      const chunk = current.renderer.take();
+      if (chunk.lines.length > 0) {
+        await deliver({ kind: "session-entries", index, chunk });
+        current.delivered = true;
+      }
+    }
   } catch (error) {
     if (!(error instanceof SessionTranscriptColdError)) {
       throw error;
     }
-    return "cold";
+    return { cold: true };
+  } finally {
+    slices.return(false);
   }
+}
+
+async function renderSnapshotEntry(
+  request: SessionEntriesWorkerInput["entries"][number],
+  snapshot: Snapshot | null,
+): Promise<PreparedEntries[number]> {
+  const entry = snapshot
+    ? await renderSessionEntrySnapshot(request.absPath, request.options, snapshot)
+    : null;
+  return {
+    entry,
+    resetRecallCutoff: entry ? readSessionEntryResetRecallCutoff(entry) : { state: "absent" },
+  };
 }
 
 function snapshotKey({ options }: SessionEntriesWorkerInput["entries"][number]) {

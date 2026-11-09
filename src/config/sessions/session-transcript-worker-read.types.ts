@@ -1,4 +1,8 @@
 import type {
+  SessionEntryHeader,
+  SessionEntryLines,
+} from "../../../packages/memory-host-sdk/src/host/session-entry-render.js";
+import type {
   BuildSessionEntryOptions,
   SessionFileEntry,
 } from "../../../packages/memory-host-sdk/src/host/session-files.js";
@@ -217,8 +221,10 @@ type SessionEntryWorkerRequest = {
   admission?: UserTurnTranscriptAdmissionReceipt;
 };
 
-export type SessionEntryWorkerInput = SessionEntryWorkerRequest &
-  ({ mode?: "entry" } | { mode: "snapshot"; includeOriginalMessages: boolean });
+export type SessionEntryWorkerInput = SessionEntryWorkerRequest & {
+  mode: "snapshot";
+  includeOriginalMessages: boolean;
+};
 
 export type SessionEntriesWorkerInput = {
   kind: "session-entries";
@@ -231,3 +237,14 @@ export type SessionEntriesWorkerResult = {
     | { cold: true }
   )[];
 };
+
+/**
+ * One acknowledged export frame. A transcript read in slices arrives as ordered line chunks,
+ * which `reset` discards, then its `streamed` header; every other entry arrives as one `value`.
+ */
+export type SessionEntriesDelivery = { kind: "session-entries"; index: number } & (
+  | { value: SessionEntriesWorkerResult["entries"][number] }
+  | { chunk: SessionEntryLines }
+  | { reset: true }
+  | { streamed: { header: SessionEntryHeader; resetRecallCutoff: SessionResetRecallCutoff } }
+);

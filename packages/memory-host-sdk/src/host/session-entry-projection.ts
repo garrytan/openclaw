@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, type Hash } from "node:crypto";
 import {
   asOptionalObjectRecord,
   asOptionalRecord,
@@ -15,9 +15,16 @@ export function hashSessionEntrySnapshot(params: {
   lineProvenance: readonly MemoryEntryProvenance[];
   resetRecallCutoff: SessionResetRecallCutoff;
 }): string {
+  return digestSessionEntrySnapshot(createHash("sha256").update(params.content), params);
+}
+
+/** Finishes a snapshot hash whose content bytes the caller has already written. */
+export function digestSessionEntrySnapshot(
+  hash: Hash,
+  params: Omit<Parameters<typeof hashSessionEntrySnapshot>[0], "content">,
+): string {
   // Preserve persisted hash bytes without flattening another full export string.
-  return createHash("sha256")
-    .update(params.content)
+  return hash
     .update("\n")
     .update(params.lineMap.join(","))
     .update("\n")

@@ -16,16 +16,17 @@ import type { readSessionTranscriptModelContext } from "./session-accessor.sqlit
 import type { SessionTranscriptRuntimeTarget } from "./session-accessor.types.js";
 import type { SessionContextMessagesWorkerInput } from "./session-history-read.types.js";
 import { unwrapSessionTranscriptWorkerReply } from "./session-history-worker-errors.js";
+import { createSessionEntriesReceiver } from "./session-memory-entry-delivery.js";
 import {
   listSqliteTargetCandidatePathsForSessionStorePath,
   resolveUnsuffixedSqliteTargetFromSessionStorePath,
 } from "./session-sqlite-target-paths.js";
+import { SessionTranscriptColdError } from "./session-transcript-cold-error.js";
 import { resolveSessionTranscriptReadFence } from "./session-transcript-read-fence.js";
 import { SESSION_TRANSCRIPT_WORKER_LIMITS } from "./session-transcript-read-pools.js";
 import type {
   SessionEntryWorkerInput,
   SessionEntriesWorkerInput,
-  SessionEntriesWorkerResult,
   SessionResetRecallWorkerInput,
   SessionModelContextWorkerInput,
   SessionSqliteTargetWorkerInput,
@@ -216,20 +217,16 @@ export async function prepareSessionEntryInWorker(
   absPath: string,
   options: SessionEntryWorkerInput["options"],
 ) {
-  const result = await readSessionEntryInWorker({
-    kind: "session-entry",
-    absPath,
-    options,
-  });
-  if (!("entry" in result)) {
-    throw new Error("Session transcript worker returned a snapshot instead of an export");
+  // One export shares the batch's acknowledged channel, which streams large transcripts.
+  const [result] = await prepareSessionEntriesInWorker([{ absPath, options }]);
+  if ("cold" in result!) {
+    throw new SessionTranscriptColdError(options.sessionId);
   }
-  return result;
+  return result!;
 }
 
 export async function prepareSessionEntriesInWorker(entries: SessionEntriesWorkerInput["entries"]) {
-  const prepared: SessionEntriesWorkerResult["entries"] = [];
-  let received = 0;
+  const receiver = createSessionEntriesReceiver(entries);
   const result = unwrapSessionTranscriptWorkerReply<
     "session-entry" | "session-entries" | "session-reset-recall"
   >(
@@ -244,23 +241,7 @@ export async function prepareSessionEntriesInWorker(entries: SessionEntriesWorke
       {
         inputBytes: JSON.stringify(entries).length * 2,
         onRequest: async (progress) => {
-          // SAFETY: The paired worker publishes one complete entry before reading its next batch.
-          const update = progress as {
-            kind: "session-entries";
-            index: number;
-            value: SessionEntriesWorkerResult["entries"][number];
-          };
-          if (
-            update.kind !== "session-entries" ||
-            !Number.isInteger(update.index) ||
-            update.index < 0 ||
-            update.index >= entries.length ||
-            update.index in prepared
-          ) {
-            throw new Error("Invalid session export delivery");
-          }
-          prepared[update.index] = update.value;
-          received++;
+          receiver.receive(progress);
           return { input: undefined, timeoutMs: 60_000 };
         },
       },
@@ -280,10 +261,10 @@ export async function prepareSessionEntriesInWorker(entries: SessionEntriesWorke
   if (!("entries" in result)) {
     throw new Error("Session transcript worker returned a single export instead of a batch");
   }
-  if (received !== entries.length) {
+  if (!receiver.complete) {
     throw new Error("Session transcript worker returned an incomplete export batch");
   }
-  return prepared;
+  return receiver.prepared;
 }
 
 export async function readSessionEntrySnapshotInWorker(
@@ -330,8 +311,8 @@ async function readSessionEntryInWorker(input: SessionEntryWorkerInput) {
       },
     ),
   );
-  if (!("entry" in result) && !("snapshot" in result)) {
-    throw new Error("Session transcript worker returned reset metadata instead of an export");
+  if (!("snapshot" in result)) {
+    throw new Error("Session transcript worker returned reset metadata instead of a snapshot");
   }
   return result;
 }

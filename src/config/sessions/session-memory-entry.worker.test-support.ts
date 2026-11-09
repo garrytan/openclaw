@@ -3,8 +3,10 @@ import {
   createWorkerTaskControl,
 } from "@openclaw/worker-runtime/worker";
 import { expect } from "vitest";
+import { createSessionEntriesReceiver } from "./session-memory-entry-delivery.js";
 import { deliverSessionMemoryEntries } from "./session-memory-entry.worker.js";
 import type {
+  SessionEntriesDelivery,
   SessionEntriesWorkerInput,
   SessionEntriesWorkerResult,
 } from "./session-transcript-worker-read.types.js";
@@ -15,8 +17,9 @@ type PreparedEntries = SessionEntriesWorkerResult["entries"];
 export async function collectSessionMemoryEntries(
   entries: SessionEntriesWorkerInput["entries"],
   publish?: (index: number, value: PreparedEntries[number]) => Promise<void>,
+  onFrame?: (frame: SessionEntriesDelivery) => void,
 ): Promise<PreparedEntries> {
-  const collected: PreparedEntries = [];
+  const receiver = createSessionEntriesReceiver(entries);
   const result = await deliverSessionMemoryEntries(
     entries,
     {
@@ -24,19 +27,19 @@ export async function collectSessionMemoryEntries(
       notify() {},
       async request(value) {
         // SAFETY: This fixture is the receiving end of the production export worker's protocol.
-        const update = value as {
-          kind: "session-entries";
-          index: number;
-          value: PreparedEntries[number];
-        };
-        expect(update.kind).toBe("session-entries");
-        await publish?.(update.index, update.value);
-        collected[update.index] = update.value;
+        const frame = value as SessionEntriesDelivery;
+        expect(frame.kind).toBe("session-entries");
+        onFrame?.(frame);
+        receiver.receive(frame);
+        const delivered = receiver.prepared[frame.index];
+        if (delivered && ("value" in frame || "streamed" in frame)) {
+          await publish?.(frame.index, delivered);
+        }
         return { input: undefined, consumed() {} };
       },
     },
     createWorkerTaskControl(createWorkerNativeSectionState(), () => true),
   );
   expect(result).toEqual({ entries: [] });
-  return collected;
+  return receiver.prepared;
 }

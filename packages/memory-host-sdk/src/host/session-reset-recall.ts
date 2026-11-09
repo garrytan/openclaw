@@ -9,19 +9,43 @@ export type SessionResetRecallCutoff =
 export function resolveSessionResetRecallCutoff(
   events: readonly unknown[],
 ): SessionResetRecallCutoff {
-  const resetIndex = events.findLastIndex((event) => asOptionalRecord(event)?.type === "reset");
-  if (resetIndex < 0) {
-    return { state: "absent" };
+  const tracker = createSessionResetRecallCutoffTracker();
+  for (const event of events) {
+    tracker.add(event);
   }
-  const reset = events[resetIndex] as { firstKeptEntryId?: unknown };
-  if (reset.firstKeptEntryId === undefined) {
-    return { state: "valid", cutoffLine: resetIndex + 1 };
-  }
-  if (typeof reset.firstKeptEntryId !== "string" || !reset.firstKeptEntryId.trim()) {
-    return { state: "invalid" };
-  }
-  const keptIndex = events.findIndex(
-    (event, index) => index < resetIndex && asOptionalRecord(event)?.id === reset.firstKeptEntryId,
-  );
-  return keptIndex < 0 ? { state: "invalid" } : { state: "valid", cutoffLine: keptIndex + 1 };
+  return tracker.resolve();
+}
+
+/** Tracks the reset cutoff across events seen in order, keeping one index per event id. */
+export function createSessionResetRecallCutoffTracker() {
+  const firstIndexById = new Map<string, number>();
+  let reset: { index: number; firstKeptEntryId: unknown } | undefined;
+  let count = 0;
+  return {
+    add(event: unknown) {
+      const record = asOptionalRecord(event);
+      if (record?.type === "reset") {
+        reset = { index: count, firstKeptEntryId: record.firstKeptEntryId };
+      }
+      if (typeof record?.id === "string" && !firstIndexById.has(record.id)) {
+        firstIndexById.set(record.id, count);
+      }
+      count++;
+    },
+    resolve(): SessionResetRecallCutoff {
+      if (!reset) {
+        return { state: "absent" };
+      }
+      if (reset.firstKeptEntryId === undefined) {
+        return { state: "valid", cutoffLine: reset.index + 1 };
+      }
+      if (typeof reset.firstKeptEntryId !== "string" || !reset.firstKeptEntryId.trim()) {
+        return { state: "invalid" };
+      }
+      const keptIndex = firstIndexById.get(reset.firstKeptEntryId);
+      return keptIndex === undefined || keptIndex >= reset.index
+        ? { state: "invalid" }
+        : { state: "valid", cutoffLine: keptIndex + 1 };
+    },
+  };
 }

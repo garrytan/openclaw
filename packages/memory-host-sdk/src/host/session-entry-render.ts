@@ -243,21 +243,47 @@ export function renderSessionEntrySnapshot(
   });
 }
 
-export async function renderSessionEntry(
+/** Rendered export lines with their source line, timestamp and provenance, one per line. */
+export type SessionEntryLines = {
+  lines: string[];
+  lineMap: number[];
+  messageTimestampsMs: number[];
+  lineProvenance: MemoryEntryProvenance[];
+};
+
+/** Entry identity and classification, without the rendered lines and their hash. */
+export type SessionEntryHeader = Omit<
+  SessionFileEntry,
+  "hash" | "content" | "lineMap" | "messageTimestampsMs" | "lineProvenance"
+>;
+
+type SessionEntryRendererSource = SessionFileState &
+  (
+    | { kind: "sqlite"; sessionKey?: string }
+    | {
+        kind: "file";
+        classification: {
+          generatedByDreamingNarrative: boolean;
+          generatedByCronRun: boolean;
+        } | null;
+      }
+  );
+
+function emptySessionEntryLines(): SessionEntryLines {
+  return { lines: [], lineMap: [], messageTimestampsMs: [], lineProvenance: [] };
+}
+
+/** Renders records in raw line order; a dreaming or cron record discards every earlier line. */
+export function createSessionEntryRenderer(
   absPath: string,
   opts: BuildSessionEntryOptions,
-  source: SessionEntrySource,
-): Promise<SessionFileEntry> {
-  const { mtimeMs, size, path: memoryPath } = source;
-  const sqliteSource = source.kind === "sqlite" ? source : null;
-  const raw = source.kind === "file" ? source.raw : "";
+  source: SessionEntryRendererSource,
+) {
+  const { mtimeMs } = source;
   const sessionStoreClassification = source.kind === "file" ? source.classification : null;
-  const collected: string[] = [];
-  const lineMap: number[] = [];
-  const messageTimestampsMs: number[] = [];
-  const lineProvenance: MemoryEntryProvenance[] = [];
-  const parseYieldEveryLines = resolveSessionEntryParseYieldLines(opts);
-  const sqliteSessionKey = !opts.sessionKey ? sqliteSource?.sessionKey : undefined;
+  let pending = emptySessionEntryLines();
+  const sqliteSessionKey =
+    !opts.sessionKey && source.kind === "sqlite" ? source.sessionKey : undefined;
   let generatedByDreamingNarrative =
     opts.generatedByDreamingNarrative ??
     (sqliteSessionKey ? isDreamingNarrativeSessionStoreKey(sqliteSessionKey) : undefined) ??
@@ -275,6 +301,142 @@ export async function renderSessionEntry(
   let insideHeartbeatTurn = false;
   let insideRecalledMemoryTurn = false;
   let turnOrigin: MemoryOriginClass = "untrusted";
+  return {
+    /** Renders one record; returns true when it discarded the lines rendered before it. */
+    render(record: unknown, jsonlIdx: number): boolean {
+      const identifiesDreamingNarrative =
+        !generatedByDreamingNarrative && isDreamingNarrativeGeneratedRecord(record);
+      const identifiesCronRun =
+        !generatedByCronRun &&
+        allowArchiveRecordCronClassification &&
+        isCronRunGeneratedRecord(record);
+      const discarded = identifiesDreamingNarrative || identifiesCronRun;
+      if (discarded) {
+        generatedByDreamingNarrative ||= identifiesDreamingNarrative;
+        generatedByCronRun ||= identifiesCronRun;
+        pending = emptySessionEntryLines();
+      }
+      const candidate = asOptionalRecord(record);
+      if (candidate?.type !== "message") {
+        return discarded;
+      }
+      const message = asOptionalRecord(candidate.message);
+      if (!message || typeof message.role !== "string") {
+        return discarded;
+      }
+      if (message.role !== "user" && message.role !== "assistant") {
+        return discarded;
+      }
+      const timestampMs = parseSessionTimestampMs(candidate, message);
+      opts.onTranscriptMessage?.(message, Math.max(0, Math.floor(timestampMs || mtimeMs)));
+      const inputProvenance = asOptionalRecord(message.provenance);
+      const isHeartbeatUser =
+        message.role === "user" &&
+        inputProvenance?.kind === "internal_system" &&
+        inputProvenance.sourceTool === "heartbeat";
+      if (message.role === "user") {
+        insideHeartbeatTurn = isHeartbeatUser;
+        insideRecalledMemoryTurn =
+          inputProvenance?.kind === "internal_system" &&
+          (inputProvenance.sourceTool === "memory_search" ||
+            inputProvenance.sourceTool === "memory_get");
+        turnOrigin = classifySessionMessageOrigin(message, turnOrigin);
+      }
+      if (message.role === "user" && hasInterSessionUserProvenance(message)) {
+        return discarded;
+      }
+      // Observers and turn provenance still see excluded messages; text export does not.
+      if (
+        insideHeartbeatTurn ||
+        insideRecalledMemoryTurn ||
+        generatedByDreamingNarrative ||
+        generatedByCronRun
+      ) {
+        return discarded;
+      }
+      if ("display" in message && message.display === false) {
+        return discarded;
+      }
+      const rawText = prepareAssistantTranscriptText(
+        message,
+        collectRawSessionText(message.content) ?? undefined,
+      );
+      if (rawText === undefined) {
+        return discarded;
+      }
+
+      // User text is not trusted archive-wide provenance. Per-message sanitization
+      // drops cron prompts without clearing unrelated content from the archive.
+      const text = sanitizeSessionText(rawText, message.role);
+      if (!text) {
+        return discarded;
+      }
+      const label = message.role === "user" ? "User" : "Assistant";
+      const renderedLines = renderSessionExportLines(label, text);
+      const memoryProvenance: MemoryEntryProvenance = {
+        originClass: classifySessionMessageOrigin(message, turnOrigin),
+        sessionKind,
+        observedAt: Math.max(0, Math.floor(timestampMs || mtimeMs)),
+      };
+      for (const line of renderedLines) {
+        pending.lines.push(line);
+        pending.lineMap.push(jsonlIdx + 1);
+        pending.messageTimestampsMs.push(timestampMs);
+        pending.lineProvenance.push(memoryProvenance);
+      }
+      return discarded;
+    },
+    /** Returns the lines rendered since the previous call. */
+    take(): SessionEntryLines {
+      const taken = pending;
+      pending = emptySessionEntryLines();
+      return taken;
+    },
+    header(): SessionEntryHeader {
+      return {
+        path: source.path,
+        absPath,
+        mtimeMs,
+        ...(source.kind === "sqlite" ? { revisionMs: source.revisionMs } : {}),
+        size: source.size,
+        sessionKind,
+        ...(generatedByDreamingNarrative ? { generatedByDreamingNarrative: true } : {}),
+        ...(generatedByCronRun ? { generatedByCronRun: true } : {}),
+      };
+    },
+  };
+}
+
+/** Joins a header with its rendered lines; `content` is the newline join of those lines. */
+export function assembleSessionEntry(
+  header: SessionEntryHeader,
+  content: string,
+  rendered: Omit<SessionEntryLines, "lines">,
+  hash: string,
+): SessionFileEntry {
+  const { sessionKind, generatedByDreamingNarrative, generatedByCronRun, ...state } = header;
+  return {
+    ...state,
+    hash,
+    content,
+    lineMap: rendered.lineMap,
+    messageTimestampsMs: rendered.messageTimestampsMs,
+    lineProvenance: rendered.lineProvenance,
+    sessionKind,
+    ...(generatedByDreamingNarrative ? { generatedByDreamingNarrative } : {}),
+    ...(generatedByCronRun ? { generatedByCronRun } : {}),
+  };
+}
+
+export async function renderSessionEntry(
+  absPath: string,
+  opts: BuildSessionEntryOptions,
+  source: SessionEntrySource,
+): Promise<SessionFileEntry> {
+  const sqliteSource = source.kind === "sqlite" ? source : null;
+  const raw = source.kind === "file" ? source.raw : "";
+  const renderer = createSessionEntryRenderer(absPath, opts, source);
+  const parseYieldEveryLines = resolveSessionEntryParseYieldLines(opts);
   // SQLite is fully snapshotted before yielding or invoking observers. Archives
   // retain raw line ordinals, including blank and malformed JSONL entries.
   for (
@@ -300,111 +462,16 @@ export async function renderSessionEntry(
         continue;
       }
     }
-    const identifiesDreamingNarrative =
-      !generatedByDreamingNarrative && isDreamingNarrativeGeneratedRecord(record);
-    const identifiesCronRun =
-      !generatedByCronRun &&
-      allowArchiveRecordCronClassification &&
-      isCronRunGeneratedRecord(record);
-    if (identifiesDreamingNarrative || identifiesCronRun) {
-      generatedByDreamingNarrative ||= identifiesDreamingNarrative;
-      generatedByCronRun ||= identifiesCronRun;
-      collected.length = 0;
-      lineMap.length = 0;
-      messageTimestampsMs.length = 0;
-      lineProvenance.length = 0;
-    }
-    const candidate = asOptionalRecord(record);
-    if (candidate?.type !== "message") {
-      continue;
-    }
-    const message = asOptionalRecord(candidate.message);
-    if (!message || typeof message.role !== "string") {
-      continue;
-    }
-    if (message.role !== "user" && message.role !== "assistant") {
-      continue;
-    }
-    const timestampMs = parseSessionTimestampMs(candidate, message);
-    opts.onTranscriptMessage?.(message, Math.max(0, Math.floor(timestampMs || mtimeMs)));
-    const inputProvenance = asOptionalRecord(message.provenance);
-    const isHeartbeatUser =
-      message.role === "user" &&
-      inputProvenance?.kind === "internal_system" &&
-      inputProvenance.sourceTool === "heartbeat";
-    if (message.role === "user") {
-      insideHeartbeatTurn = isHeartbeatUser;
-      insideRecalledMemoryTurn =
-        inputProvenance?.kind === "internal_system" &&
-        (inputProvenance.sourceTool === "memory_search" ||
-          inputProvenance.sourceTool === "memory_get");
-      turnOrigin = classifySessionMessageOrigin(message, turnOrigin);
-    }
-    if (message.role === "user" && hasInterSessionUserProvenance(message)) {
-      continue;
-    }
-    // Observers and turn provenance still see excluded messages; text export does not.
-    if (
-      insideHeartbeatTurn ||
-      insideRecalledMemoryTurn ||
-      generatedByDreamingNarrative ||
-      generatedByCronRun
-    ) {
-      continue;
-    }
-    if ("display" in message && message.display === false) {
-      continue;
-    }
-    const rawText = prepareAssistantTranscriptText(
-      message,
-      collectRawSessionText(message.content) ?? undefined,
-    );
-    if (rawText === undefined) {
-      continue;
-    }
-
-    // User text is not trusted archive-wide provenance. Per-message sanitization
-    // drops cron prompts without clearing unrelated content from the archive.
-    const text = sanitizeSessionText(rawText, message.role);
-    if (!text) {
-      continue;
-    }
-    const label = message.role === "user" ? "User" : "Assistant";
-    const renderedLines = renderSessionExportLines(label, text);
-    const memoryProvenance: MemoryEntryProvenance = {
-      originClass: classifySessionMessageOrigin(message, turnOrigin),
-      sessionKind,
-      observedAt: Math.max(0, Math.floor(timestampMs || mtimeMs)),
-    };
-    collected.push(...renderedLines);
-    lineMap.push(...renderedLines.map(() => jsonlIdx + 1));
-    messageTimestampsMs.push(...renderedLines.map(() => timestampMs));
-    lineProvenance.push(...renderedLines.map(() => memoryProvenance));
+    renderer.render(record, jsonlIdx);
   }
-  const content = collected.join("\n");
-  const entry: SessionFileEntry = {
-    path: memoryPath,
-    absPath,
-    mtimeMs,
-    ...(sqliteSource ? { revisionMs: sqliteSource.revisionMs } : {}),
-    size,
-    hash: hashSessionEntrySnapshot({
-      content,
-      lineMap,
-      messageTimestampsMs,
-      lineProvenance,
-      resetRecallCutoff: sqliteSource?.resetRecallCutoff ?? { state: "absent" },
-    }),
+  const { lines, ...rendered } = renderer.take();
+  const content = lines.join("\n");
+  const resetRecallCutoff = sqliteSource?.resetRecallCutoff ?? { state: "absent" };
+  const entry = assembleSessionEntry(
+    renderer.header(),
     content,
-    lineMap,
-    messageTimestampsMs,
-    lineProvenance,
-    sessionKind,
-    ...(generatedByDreamingNarrative ? { generatedByDreamingNarrative: true } : {}),
-    ...(generatedByCronRun ? { generatedByCronRun: true } : {}),
-  };
-  return attachSessionEntryResetRecallCutoff(
-    entry,
-    sqliteSource?.resetRecallCutoff ?? { state: "absent" },
+    rendered,
+    hashSessionEntrySnapshot({ content, ...rendered, resetRecallCutoff }),
   );
+  return attachSessionEntryResetRecallCutoff(entry, resetRecallCutoff);
 }
