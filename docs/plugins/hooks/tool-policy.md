@@ -36,8 +36,10 @@ contributions, and transcript persistence. Part of the [Plugin hooks](/plugins/h
   listeners they register
 - optional `ctx.requester`, the host-derived requester that initiated the current
   message run. It can include `channel`, `accountId`, `senderId`,
-  `senderIsOwner`, and provider-native `roleIds`. Missing fields are unproven,
-  not false assurances; deny the action if policy requires those fields.
+  `senderIsOwner`, provider-native `roleIds`, and `deviceId`, the paired device
+  of the Gateway connection that sent the turn after the Gateway verified its
+  signature (never a request parameter or client name). Missing fields are
+  unproven, not false assurances; deny the action if policy requires those fields.
 
 It can return:
 

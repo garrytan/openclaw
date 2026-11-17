@@ -10,6 +10,7 @@ export function buildHarnessHostRequester(
     | "senderId"
     | "senderIsOwner"
     | "memberRoleIds"
+    | "approvalReviewerDeviceId"
   >,
 ) {
   return {
@@ -22,5 +23,6 @@ export function buildHarnessHostRequester(
     ...(attempt.memberRoleIds?.length
       ? { roleIds: Object.freeze([...attempt.memberRoleIds]) }
       : {}),
+    ...(attempt.approvalReviewerDeviceId ? { deviceId: attempt.approvalReviewerDeviceId } : {}),
   };
 }

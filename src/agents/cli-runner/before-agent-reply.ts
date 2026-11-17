@@ -42,6 +42,7 @@ export async function runCliBeforeAgentReply(
               senderId: params.senderId,
               chatId: params.chatId,
               channelContext: params.channelContext,
+              approvalReviewerDeviceId: params.approvalReviewerDeviceId,
             }),
           },
           onDispatch: () =>

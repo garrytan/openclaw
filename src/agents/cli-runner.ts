@@ -294,6 +294,7 @@ async function runPreparedCliAgentOwned(
       senderId: params.senderId,
       chatId: params.chatId,
       channelContext: params.channelContext,
+      approvalReviewerDeviceId: params.approvalReviewerDeviceId,
     }),
   } as const;
 

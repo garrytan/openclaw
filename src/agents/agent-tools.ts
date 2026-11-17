@@ -599,6 +599,7 @@ function* assembleOpenClawCodingTools(
     ...(options?.senderId ? { senderId: options.senderId } : {}),
     ...(options?.senderIsOwner !== undefined ? { senderIsOwner: options.senderIsOwner } : {}),
     ...(options?.memberRoleIds?.length ? { roleIds: [...options.memberRoleIds] } : {}),
+    ...(options?.approvalReviewerDeviceId ? { deviceId: options.approvalReviewerDeviceId } : {}),
   } satisfies PluginHookToolRequesterContext;
   const hasRequester = Object.keys(requester).length > 0;
   const hookContext = {
