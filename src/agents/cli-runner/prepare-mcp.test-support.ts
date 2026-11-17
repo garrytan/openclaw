@@ -146,7 +146,7 @@ export function registerCliMcpPreparationTests({
         modelProvider: "anthropic",
         modelId: "test-model",
         messageProvider: "telegram",
-        requester: { channel: "telegram", senderId: "canonical-sender" },
+        requester: { channel: "telegram", senderId: "canonical-sender", deviceId: "reviewer-device" },
         clientCaps: ["tool-events", "inline-widgets"],
         pinnedWidgetAuthoring: true,
         currentChannelId: "telegram:-100123:topic:42",

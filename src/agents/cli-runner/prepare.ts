@@ -39,7 +39,10 @@ import type {
   CliBackendPreparedExecution,
   CliBackendPromptContext,
 } from "../../plugins/cli-backend.types.js";
-import { buildAgentHookContextChannelFields } from "../../plugins/hook-agent-context.js";
+import {
+  buildAgentHookContextChannelFields,
+  buildAgentHookContextIdentityFields,
+} from "../../plugins/hook-agent-context.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import {
   LEGACY_IMPLICIT_AGENT_ID,
@@ -561,6 +564,7 @@ async function prepareCliRunContextWithinReadFence(
     openClawHistoryMessages ??= await loadCliSessionHistoryMessages(params);
     return openClawHistoryMessages;
   };
+  const { requesterDeviceId } = buildAgentHookContextIdentityFields(params);
   const promptBuildHookContext = {
     runId: params.runId,
     agentId: sessionAgentId,
@@ -572,6 +576,7 @@ async function prepareCliRunContextWithinReadFence(
     trigger: params.trigger,
     inputProvenance: params.inputProvenance,
     ...buildAgentHookContextChannelFields(params),
+    ...(requesterDeviceId ? { requesterDeviceId } : {}),
   };
   const promptBuildHookRunner = skipsTurnPreparation ? undefined : getGlobalHookRunner();
   let promptBuildHookResult: ResolvedPromptBuildHookResult | undefined;
