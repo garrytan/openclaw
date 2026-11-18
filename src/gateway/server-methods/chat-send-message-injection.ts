@@ -87,6 +87,7 @@ export function createChatSendMessageInjectionStarter(params: {
       storePath,
       sessionId: entry?.sessionId,
       sourceTurnId: normalizeOptionalString(target.sourceTurnId),
+      runId: target.runId,
       entry,
       assertCurrent,
     });

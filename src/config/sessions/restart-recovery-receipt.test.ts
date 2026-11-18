@@ -192,6 +192,7 @@ describe("restart recovery steering block reasons", () => {
     name: string;
     fields?: Partial<SessionEntry>;
     sourceTurnId: string;
+    activeRunId?: string;
     reason: ReturnType<typeof resolveRestartRecoverySteeringBlockReason>;
   }>([
     {
@@ -239,6 +240,20 @@ describe("restart recovery steering block reasons", () => {
       reason: "unknown-source-with-terminal-history",
     },
     {
+      name: "claimless entry with tombstones and an unknown source on an untombstoned run",
+      fields: { status: undefined, restartRecoveryTerminalRunIds: ["source-old"] },
+      sourceTurnId: "",
+      activeRunId: "announce-run",
+      reason: undefined,
+    },
+    {
+      name: "claimless entry with an unknown source on a tombstoned run",
+      fields: { status: undefined, restartRecoveryTerminalRunIds: ["source-old", "recovered-run"] },
+      sourceTurnId: "",
+      activeRunId: "recovered-run",
+      reason: "unknown-source-with-terminal-history",
+    },
+    {
       name: "stale claim",
       fields: { ...claim, status: "done", restartRecoveryDeliverySourceRunId: "source-2" },
       sourceTurnId: "source-1",
@@ -267,10 +282,10 @@ describe("restart recovery steering block reasons", () => {
       reason: undefined,
     })),
     { name: "missing entry", sourceTurnId: "source-1", reason: undefined },
-  ])("classifies $name", ({ fields, sourceTurnId, reason }) => {
+  ])("classifies $name", ({ fields, sourceTurnId, activeRunId, reason }) => {
     const entry = fields ? { sessionId: "session-1", updatedAt: 1, ...fields } : undefined;
-    expect(resolveRestartRecoverySteeringBlockReason(entry, "session-1", sourceTurnId)).toBe(
-      reason,
-    );
+    expect(
+      resolveRestartRecoverySteeringBlockReason(entry, "session-1", sourceTurnId, activeRunId),
+    ).toBe(reason);
   });
 });

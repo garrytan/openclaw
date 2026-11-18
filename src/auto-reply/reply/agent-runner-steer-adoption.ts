@@ -200,6 +200,7 @@ export async function runActiveReplySteer(
       storePath: params.storePath,
       sessionId: steerSessionId,
       sourceTurnId: injectionTarget.sourceTurnId,
+      runId: injectionTarget.runId,
       entry: params.sessionEntry,
       assertCurrent: assertReadCurrent,
     });

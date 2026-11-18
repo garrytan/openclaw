@@ -42,6 +42,7 @@ export function prepareSteeringDelivery(params: {
   storePath?: string;
   sessionId?: string;
   sourceTurnId?: string;
+  runId?: string;
   entry?: SessionEntry;
   assertCurrent: () => void;
 }) {
@@ -57,6 +58,7 @@ export function prepareSteeringDelivery(params: {
       params.sourceTurnId ??
         normalizeOptionalString(entry?.restartRecoveryDeliverySourceRunId) ??
         "",
+      params.runId,
     );
     if (reason) {
       throw new MessageInjectionTargetUnavailableError(
@@ -149,6 +151,7 @@ export function prepareSteeringDelivery(params: {
               params.sourceTurnId ??
                 normalizeOptionalString(after?.restartRecoveryDeliverySourceRunId) ??
                 "",
+              params.runId,
             ),
         });
         unregister = registerOpenClawAgentDatabaseAsyncResource({

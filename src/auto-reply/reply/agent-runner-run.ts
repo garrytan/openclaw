@@ -263,6 +263,9 @@ export async function runReplyAgent(
     restartRecoveryEntry,
     activeReplyOperation?.sessionId ?? followupRun.run.sessionId,
     activeSourceTurnId,
+    sessionKey
+      ? replyRunRegistry.resolveCurrentMessageInjectionTarget(sessionKey)?.runId
+      : undefined,
   );
   const shouldQueueTerminalReceiptSteer =
     effectiveShouldSteer &&

@@ -7,6 +7,7 @@ import type { SessionEntry } from "../../config/sessions/types.js";
 import { createReplyAgentRestartRecoveryController } from "./agent-runner-restart-recovery.js";
 import { createReplyOperation, replyRunRegistry } from "./reply-run-registry.js";
 import { createReplyRecoveryActorFixture } from "./restart-recovery-claim.test-support.js";
+import { prepareSteeringDelivery } from "./steering-delivery-preparation.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
@@ -98,4 +99,47 @@ describe("admitted Gateway source identity", () => {
       expect(entry.restartRecoveryTerminalRunIds).toEqual(["gateway-previous-run"]);
     },
   );
+  it.each([
+    { name: "a run it never recovered", runId: "announce-run", blocked: false },
+    { name: "a tombstoned run", runId: "gateway-previous-run", blocked: true },
+  ])("decides a sourceless turn's steering on $name by its run id", async ({ runId, blocked }) => {
+    const sessionKey = `agent:main:sourceless-${runId}`;
+    const sessionId = "session-1";
+    const entry: SessionEntry = {
+      sessionId,
+      updatedAt: 1,
+      restartRecoveryTerminalRunIds: ["gateway-previous-run"],
+    };
+    const operation = createReplyOperation({ sessionKey, sessionId, resetTriggered: false });
+    operation.setPhase("running");
+    operation.attachBackend({
+      kind: "embedded",
+      runId,
+      cancel: () => {},
+      messageInjection: {
+        isAvailable: () => true,
+        queueMessage: async () => {},
+      },
+    });
+
+    const target = replyRunRegistry.resolveCurrentMessageInjectionTarget(sessionKey);
+    expect(target?.sourceTurnId).toBeUndefined();
+    expect(target?.runId).toBe(runId);
+    const delivery = prepareSteeringDelivery({
+      agentId: "main",
+      sessionId,
+      sourceTurnId: target?.sourceTurnId,
+      runId: target?.runId,
+      entry,
+      assertCurrent: () => {},
+    });
+    if (blocked) {
+      await expect(delivery.prepareCurrent()).rejects.toThrow(
+        "unknown-source-with-terminal-history",
+      );
+    } else {
+      await expect(delivery.prepareCurrent()).resolves.toBeUndefined();
+    }
+    operation.complete();
+  });
 });

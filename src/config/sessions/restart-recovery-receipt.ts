@@ -23,6 +23,7 @@ export function resolveRestartRecoverySteeringBlockReason(
   entry: SessionEntry | null | undefined,
   sessionId: string,
   sourceTurnId: string,
+  activeRunId?: string,
 ):
   | "terminal-pending"
   | "delivered-terminal"
@@ -47,10 +48,16 @@ export function resolveRestartRecoverySteeringBlockReason(
     sourceTurnId: normalizedSourceTurnId,
   });
   if (disposition === "not-applicable") {
-    // Without a known active source, any retained tombstone could belong to it.
+    // Tombstones name terminal recovered runs. Without a known active source,
+    // only an unidentified run or a tombstoned run itself could be one of them.
+    const terminalRunIds = normalizeRestartRecoveryTerminalRunIds(
+      entry.restartRecoveryTerminalRunIds,
+    );
+    const normalizedActiveRunId = normalizeOptionalString(activeRunId);
     if (
       normalizedSourceTurnId === "" &&
-      (normalizeRestartRecoveryTerminalRunIds(entry.restartRecoveryTerminalRunIds)?.length ?? 0) > 0
+      terminalRunIds?.length &&
+      (!normalizedActiveRunId || terminalRunIds.includes(normalizedActiveRunId))
     ) {
       return "unknown-source-with-terminal-history";
     }

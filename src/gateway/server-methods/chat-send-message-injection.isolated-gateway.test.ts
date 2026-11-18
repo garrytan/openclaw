@@ -280,11 +280,11 @@ describe("terminal-receipt steer fence isolated-gateway proof (#128971)", () => 
       replyText: "after-fix follow-up reply from the production dispatcher",
     },
     {
-      name: "a retained tombstone with unknown active source identity",
+      name: "a sourceless active run whose own run id is tombstoned",
       sessionKey: "agent:main:unknown-source",
       sessionId: "session-unknown-source",
       runId: "live-run-unknown-source",
-      terminalRunId: "source-old",
+      terminalRunId: "live-run-unknown-source",
       message: "unknown-source isolated-gateway inbound",
       replyText: "unknown-source follow-up reply from the production dispatcher",
     },
@@ -399,6 +399,40 @@ describe("terminal-receipt steer fence isolated-gateway proof (#128971)", () => 
       expect(res.payload?.status).toBe("started");
       expect(queueMessage).toHaveBeenCalledOnce();
       expect(queueMessage.mock.calls[0]?.[0]).toContain("unrelated-tombstone inbound");
+      expect(dispatchCapture.calls).toBe(0);
+    },
+  );
+
+  it(
+    "isolated gateway: steers into a sourceless active run whose own run id is not tombstoned",
+    { timeout: 30_000 },
+    async () => {
+      // A completion announce or other internal turn binds no channel source.
+      // A settled recovered run always tombstones its own run id, so a tombstone
+      // from an earlier recovered run must not fence steering into this one.
+      const queueMessage = await seedActiveTurn({
+        sessionKey: "agent:main:sourceless-steer",
+        sessionId: "session-sourceless-steer",
+        runId: "live-run-sourceless",
+        terminalRunId: "source-old",
+      });
+      const runId = `idem-iso-gw-sourceless-${randomUUID()}`;
+      const res = (await rpcReq(
+        ws,
+        "chat.send",
+        {
+          sessionKey: "agent:main:sourceless-steer",
+          message: "sourceless-run inbound",
+          idempotencyKey: runId,
+          queueMode: "steer",
+        },
+        20_000,
+      )) as WireResponse;
+
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+      expect(res.payload?.status).toBe("started");
+      expect(queueMessage).toHaveBeenCalledOnce();
+      expect(queueMessage.mock.calls[0]?.[0]).toContain("sourceless-run inbound");
       expect(dispatchCapture.calls).toBe(0);
     },
   );
