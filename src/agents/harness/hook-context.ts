@@ -1,5 +1,8 @@
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { buildAgentHookContextIdentityFields } from "../../plugins/hook-agent-context.js";
+import {
+  buildAgentHookContextExecRequestFields,
+  buildAgentHookContextIdentityFields,
+} from "../../plugins/hook-agent-context.js";
 import type { PluginHookAgentContext } from "../../plugins/hook-types.js";
 import {
   assertMemoryAudienceCurrent,
@@ -67,5 +70,6 @@ export function buildAgentHookContext(params: AgentHarnessHookContext): PluginHo
       channelContext: params.channelContext,
       approvalReviewerDeviceId: params.requesterDeviceId,
     }),
+    ...buildAgentHookContextExecRequestFields(params.runId),
   };
 }

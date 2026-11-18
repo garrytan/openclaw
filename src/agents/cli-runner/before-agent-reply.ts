@@ -5,6 +5,7 @@ import {
 } from "../../plugins/before-agent-reply.js";
 import {
   buildAgentHookContextChannelFields,
+  buildAgentHookContextExecRequestFields,
   buildAgentHookContextIdentityFields,
 } from "../../plugins/hook-agent-context.js";
 import { resolveCliBackendConfig } from "../cli-backends.js";
@@ -44,6 +45,7 @@ export async function runCliBeforeAgentReply(
               channelContext: params.channelContext,
               approvalReviewerDeviceId: params.approvalReviewerDeviceId,
             }),
+            ...buildAgentHookContextExecRequestFields(params.runId),
           },
           onDispatch: () =>
             params.onExecutionPhase?.({

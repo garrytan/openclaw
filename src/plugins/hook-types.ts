@@ -13,6 +13,7 @@ import type { ImageContent } from "../llm/types.js";
 import type {
   PluginHookAgentContext,
   PluginHookContextWindow,
+  PluginHookExecRequestOwner,
 } from "./hook-agent-context.types.js";
 import type {
   PluginHookBeforeModelResolveEvent,
@@ -55,6 +56,7 @@ export type { PluginHookReplyDispatchEvent } from "./hook-reply-dispatch-event.t
 
 export type {
   PluginHookAgentContext,
+  PluginHookExecRequestOwner,
   PluginHookToolAuthority,
 } from "./hook-agent-context.types.js";
 
@@ -551,6 +553,8 @@ export type PluginHookToolContext = {
    * closed when a required field is absent.
    */
   requester?: PluginHookToolRequesterContext;
+  /** Same as the agent hook context's `execRequestOwners`, for the run making this call. */
+  execRequestOwners?: readonly PluginHookExecRequestOwner[];
 };
 
 export type PluginHookBeforeToolCallEvent = {

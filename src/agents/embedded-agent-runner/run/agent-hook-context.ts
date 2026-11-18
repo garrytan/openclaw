@@ -1,5 +1,6 @@
 import {
   buildAgentHookContextChannelFields,
+  buildAgentHookContextExecRequestFields,
   buildAgentHookContextIdentityFields,
 } from "../../../plugins/hook-agent-context.js";
 import type { PluginHookAgentContext } from "../../../plugins/hook-types.js";
@@ -47,5 +48,6 @@ export function buildEmbeddedAgentHookContext(
     trigger: run.trigger,
     ...buildAgentHookContextChannelFields(run),
     ...buildAgentHookContextIdentityFields(run),
+    ...buildAgentHookContextExecRequestFields(run.runId),
   };
 }

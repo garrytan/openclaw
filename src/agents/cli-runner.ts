@@ -15,6 +15,7 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getAgentScopedMediaLocalRoots } from "../media/local-roots.js";
 import {
   buildAgentHookContextChannelFields,
+  buildAgentHookContextExecRequestFields,
   buildAgentHookContextIdentityFields,
 } from "../plugins/hook-agent-context.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
@@ -296,6 +297,7 @@ async function runPreparedCliAgentOwned(
       channelContext: params.channelContext,
       approvalReviewerDeviceId: params.approvalReviewerDeviceId,
     }),
+    ...buildAgentHookContextExecRequestFields(params.runId),
   } as const;
 
   const buildAgentEndMessages = (lastAssistant?: unknown): unknown[] =>

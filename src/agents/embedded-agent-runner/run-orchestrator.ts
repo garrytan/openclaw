@@ -19,6 +19,7 @@ import {
 } from "../../plugins/before-agent-reply.js";
 import {
   buildAgentHookContextChannelFields,
+  buildAgentHookContextExecRequestFields,
   buildAgentHookContextIdentityFields,
 } from "../../plugins/hook-agent-context.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
@@ -505,6 +506,7 @@ async function runEmbeddedAgentForSession(
                 trigger: params.trigger,
                 ...buildAgentHookContextChannelFields(params),
                 ...buildAgentHookContextIdentityFields(params),
+                ...buildAgentHookContextExecRequestFields(params.runId),
               };
               const hookResult = await runBeforeAgentReplyForTurn({
                 awaitSessionDiffBaseline: params.awaitSessionDiffBaseline,

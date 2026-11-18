@@ -1,5 +1,6 @@
 /** Builds plugin hook agent context snapshots from active session and model state. */
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { readInheritedExecRequestOwners } from "../infra/exec-request-context.js";
 import { parseRawSessionConversationRef } from "../sessions/session-key-utils.js";
 import type { PluginHookChannelContext } from "./hook-channel-context.types.js";
 import type { PluginHookAgentContext } from "./hook-types.js";
@@ -123,6 +124,14 @@ export function buildAgentHookContextChannelFields(params: {
     chatId: channelId,
     senderId: normalizeOptionalString(params.senderId),
   };
+}
+
+/** Host-recorded starters of the commands this run continues, independent of the trigger. */
+export function buildAgentHookContextExecRequestFields(
+  runId: string | null | undefined,
+): Pick<PluginHookAgentContext, "execRequestOwners"> {
+  const execRequestOwners = readInheritedExecRequestOwners(normalizeOptionalString(runId));
+  return execRequestOwners ? { execRequestOwners } : {};
 }
 
 export function buildAgentHookContextIdentityFields(params: {
